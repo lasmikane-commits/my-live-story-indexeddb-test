@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="apple-mobile-web-app-capable" content="yes"><title>Test B · IndexedDB iPhone</title>
+<style>
+body{margin:0;background:#f4f6fa;color:#14243b;font:16px system-ui}main{max-width:36rem;margin:auto;padding:1.2rem}h1{font-size:1.6rem}img{display:block;width:144px;height:96px;object-fit:contain;margin:1rem 0;border-radius:.6rem}button{font:inherit;padding:.7rem;border:1px solid #7990ac;border-radius:.5rem;background:white;color:inherit;margin:.3rem .2rem .3rem 0}button:disabled{opacity:.5}textarea{width:100%;box-sizing:border-box;min-height:20rem;padding:.8rem;font:14px monospace;background:white;border:1px solid #7990ac;border-radius:.5rem}label{display:block;font-weight:600;margin:.8rem 0 .3rem}
+</style></head><body><main>
+<h1>Test B · IndexedDB iPhone</h1>
+<p>Enregistrez l’image V1, fermez complètement l’app puis rouvrez-la depuis son icône.</p>
+<p id="status" role="status">Recherche dans le cache local…</p>
+<img id="image" hidden alt="Image synthétique" style="display:none">
+<div id="actions"><button id="v1">Enregistrer V1</button><button id="v2">Remplacer par V2</button><button id="clear">Effacer le cache</button></div>
+<label for="report">Rapport de test</label><textarea id="report" readonly></textarea>
+<button id="copy">Copier le rapport</button><span id="copyStatus" role="status"></span>
+</main><script>
+'use strict';
+const dbName = 'mls-iphone-indexeddb-test-b';
+const schemaVersion = 1;
+const image = document.getElementById('image');
+const report = document.getElementById('report');
+const status = document.getElementById('status');
+const controls = [...document.querySelectorAll('#actions button')];
+const standalone = navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
+const state = {
+  'Ouverture': new Date().toISOString(), 'Origine de l’iframe': location.origin,
+  'Dans une iframe': window !== window.top ? 'oui' : 'non',
+  'Mode autonome détecté depuis cette page': standalone ? 'oui' : 'non',
+  'Identifiant de session': crypto.randomUUID(),
+  'Navigateur': navigator.userAgent,
+  'Version iOS': navigator.userAgent.match(/(?:iPhone OS|CPU OS) ([\d_]+)/)?.[1].replaceAll('_','.') || 'non détectée',
+  'Nom de la base': dbName, 'Version du schéma': schemaVersion,
+  'onupgradeneeded': 'non', 'IndexedDB': 'vérification',
+  'Image trouvée à l’ouverture': 'vérification', 'Version à l’ouverture': '—',
+  'Source affichée': '—', 'Version affichée': '—', 'Version enregistrée': '—',
+  'Écriture confirmée': 'non effectuée', 'Lecture confirmée': 'non',
+  'Appels de récupération d’image depuis l’ouverture': 0,
+  'Octets PNG reçus depuis l’ouverture': 0, 'Erreur': 'aucune'
+};
+let db, objectUrl;
+function render() { report.value = Object.entries(state).map(([key,value])=>key+' : '+value).join('\n'); }
+function clearImage() {
+  if (objectUrl) URL.revokeObjectURL(objectUrl);
+  objectUrl = null;
+  image.removeAttribute('src');
+  image.hidden = true;
+  image.style.display = 'none';
+}
+function openDb() {
+  return new Promise((resolve,reject)=>{
+    const request=indexedDB.open(dbName,schemaVersion);
+    request.onupgradeneeded=event=>{
+    state.onupgradeneeded='oui ('+event.oldVersion+' → '+event.newVersion+')';
+    if (event.oldVersion===0) request.result.createObjectStore('miniatures');
+  };
+    request.onsuccess=()=>resolve(request.result);
+    request.onerror=()=>reject(request.error);
+    request.onblocked=()=>reject(new Error('Ouverture IndexedDB bloquée par une autre page.'));
+  });
+}
+function transact(mode, operation) {
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction('miniatures',mode);
+    const request=operation(tx.objectStore('miniatures'));
+    tx.oncomplete=()=>resolve(request.result);
+    tx.onabort=()=>reject(tx.error || request.error || new Error('Transaction IndexedDB annulée.'));
+  });
+}
+const readLocal=()=>transact('readonly',store=>store.get('image'));
+async function show(record) {
+  if (!(record?.blob instanceof Blob) || record.blob.type!=='image/png' || ![1,2].includes(record.version)) {
+    throw new Error('Enregistrement IndexedDB invalide.');
+  }
+  clearImage();
+  objectUrl=URL.createObjectURL(record.blob);
+  image.src=objectUrl;
+  try { await image.decode(); }
+  catch (error) { clearImage(); throw error; }
+  image.hidden=false;
+  image.style.display='block';
+  image.alt='Image synthétique V'+record.version;
+  state['Source affichée']='Cache local IndexedDB';
+  state['Version affichée']='V'+record.version;
+  state['Version enregistrée']='V'+record.version;
+  state['Lecture confirmée']='oui, Blob décodé ('+record.blob.size+' octets)';
+  status.textContent='Lecture depuis le cache local IndexedDB · V'+record.version;
+}
+async function fetchImage(version) {
+  state['Appels de récupération d’image depuis l’ouverture']++;
+  render();
+  const response=await fetch('./synthetic.png',{cache:'no-store',redirect:'error'});
+  if (!response.ok) throw new Error('Récupération PNG : HTTP '+response.status);
+  const blob=await response.blob();
+  state['Octets PNG reçus depuis l’ouverture']+=blob.size;
+  if (blob.type!=='image/png'||!blob.size) throw new Error('Réponse PNG invalide.');
+  if (version===1) return blob;
+  const url=URL.createObjectURL(blob);
+  try {
+    const source=new Image(); source.src=url; await source.decode();
+    const canvas=document.createElement('canvas');
+    canvas.width=source.naturalWidth; canvas.height=source.naturalHeight;
+    const context=canvas.getContext('2d');
+    context.drawImage(source,0,0);
+    const pixels=context.getImageData(0,0,canvas.width,canvas.height);
+    for(let i=0;i<pixels.data.length;i+=4) for(let channel=0;channel<3;channel++) pixels.data[i+channel]=255-pixels.data[i+channel];
+    context.putImageData(pixels,0,0);
+    return await new Promise((resolve,reject)=>canvas.toBlob(image=>image ? resolve(image) : reject(new Error('Encodage V2 impossible.')),'image/png'));
+  } finally { URL.revokeObjectURL(url); }
+}
+async function replace(version) {
+  const record={version,blob:await fetchImage(version)};
+  // La transaction remplace l’ancienne version en une seule écriture.
+  await transact('readwrite',store=>store.put(record,'image'));
+  state['Écriture confirmée']='oui, transaction terminée';
+  state['Version enregistrée']='V'+version;
+  state['Lecture confirmée']='non';
+  await show(await readLocal());
+}
+async function run(task) {
+  controls.forEach(button=>button.disabled=true);
+  state['Erreur']='aucune';
+  try { await task(); }
+  catch(error) {
+    state['Erreur']=(error?.name || 'Erreur')+' : '+(error?.message || String(error));
+    status.textContent=state['Erreur'];
+  } finally { controls.forEach(button=>button.disabled=!db); render(); }
+}
+document.getElementById('v1').onclick=()=>run(()=>replace(1));
+document.getElementById('v2').onclick=()=>run(()=>replace(2));
+document.getElementById('clear').onclick=()=>run(async()=>{
+  await transact('readwrite',store=>store.delete('image'));
+  if (await readLocal()!==undefined) throw new Error('L’image est toujours présente.');
+  clearImage();
+  state['Source affichée']='—';
+  state['Version affichée']='—';
+  state['Version enregistrée']='absente';
+  state['Écriture confirmée']='cache effacé, transaction terminée';
+  state['Lecture confirmée']='oui, absence vérifiée';
+  status.textContent='Cache de test effacé.';
+});
+document.getElementById('copy').onclick=async()=>{
+  const notice=document.getElementById('copyStatus');
+  try { await navigator.clipboard.writeText(report.value); notice.textContent='Rapport copié.'; }
+  catch { report.focus();report.select();notice.textContent='Utilisez la commande Copier dans le champ du rapport.'; }
+};
+run(async()=>{
+  try { db=await openDb();state['IndexedDB']='disponible, base ouverte'; }
+  catch(error){state['IndexedDB']='échec d’ouverture';state['Image trouvée à l’ouverture']='indéterminée';throw error;}
+  const saved=await readLocal();
+  state['Image trouvée à l’ouverture']=saved===undefined?'absente':'présente';
+  if (saved===undefined) {
+    state['Lecture confirmée']='oui, absence vérifiée';
+    state['Version enregistrée']='absente';
+    status.textContent='Aucune image dans IndexedDB à l’ouverture.';
+    return;
+  }
+  state['Version à l’ouverture']='V'+saved.version;
+  await show(saved);
+});
+render();
+</script></body></html>
